@@ -116,10 +116,14 @@ class RAGClient:
     def _create_embedding_func(self) -> EmbeddingFunc:
         api = self.config.api
         api_kwargs = self._get_api_kwargs()
+        # openai_embed is already wrapped by @wrap_embedding_func_with_attrs as an EmbeddingFunc
+        # with default embedding_dim=1536. Use openai_embed.func to get the raw async function
+        # and avoid double-wrapping which causes vector count mismatch validation errors.
+        raw_openai_embed = openai_embed.func if hasattr(openai_embed, 'func') else openai_embed
         return EmbeddingFunc(
             embedding_dim=api.embedding_dim,
             max_token_size=api.embedding_max_tokens,
-            func=lambda texts: openai_embed(
+            func=lambda texts: raw_openai_embed(
                 texts, model=api.embedding_model,
                 **api_kwargs,
             ),
