@@ -6,6 +6,8 @@ FROM python:3.12-slim
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     curl \
+    libreoffice \
+    fonts-noto-cjk \
     libglib2.0-0 \
     libsm6 \
     libxext6 \
@@ -31,7 +33,7 @@ WORKDIR /app
 
 # Copy requirements.txt
 COPY requirements.txt .
-COPY paper2slides/.env.example paper2slides/.env.example
+COPY .env.example .env.example
 
 # Install Python dependencies
 RUN pip install --no-cache-dir --default-timeout=100 -r requirements.txt

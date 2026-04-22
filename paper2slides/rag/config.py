@@ -10,12 +10,16 @@ from pathlib import Path
 from typing import Optional, List
 from dotenv import load_dotenv
 
-PROJECT_ROOT = Path(__file__).parent.parent
+PACKAGE_ROOT = Path(__file__).parent.parent
+REPO_ROOT = PACKAGE_ROOT.parent
 
-load_dotenv(dotenv_path=PROJECT_ROOT / ".env", override=False)
+for env_path in (REPO_ROOT / ".env", PACKAGE_ROOT / ".env"):
+    if env_path.exists():
+        load_dotenv(dotenv_path=env_path, override=False)
+        break
 
-DEFAULT_STORAGE_DIR = PROJECT_ROOT / "rag" / "storage"
-DEFAULT_OUTPUT_DIR = PROJECT_ROOT / "rag" / "output"
+DEFAULT_STORAGE_DIR = PACKAGE_ROOT / "rag" / "storage"
+DEFAULT_OUTPUT_DIR = PACKAGE_ROOT / "rag" / "output"
 
 
 @dataclass
@@ -113,7 +117,7 @@ class BatchConfig:
     supported_file_extensions: List[str] = field(
         default_factory=lambda: os.getenv(
             "SUPPORTED_FILE_EXTENSIONS",
-            ".pdf,.jpg,.jpeg,.png,.bmp,.tiff,.tif,.gif,.webp,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.txt,.md"
+            ".pdf,.jpg,.jpeg,.png,.bmp,.tiff,.tif,.gif,.webp,.doc,.docx,.ppt,.pptx,.xls,.xlsx,.txt,.md,.markdown"
         ).split(",")
     )
     """List of supported file extensions for batch processing."""
@@ -206,7 +210,7 @@ class RAGConfig:
     def to_rag_anything_config(self):
         """Convert to RAGAnythingConfig for internal use."""
         import sys
-        sys.path.insert(0, str(PROJECT_ROOT))
+        sys.path.insert(0, str(PACKAGE_ROOT))
         from raganything import RAGAnythingConfig
         
         return RAGAnythingConfig(

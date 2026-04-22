@@ -13,14 +13,12 @@ services:
       - "8000:8000"
     volumes:
       - ../outputs:/app/outputs
-      - ../paper2slides/.env:/app/paper2slides/.env
+      - ../sources:/app/sources
+      - ../.env:/app/.env
+    env_file:
+      - ../.env
     environment:
       - PYTHONUNBUFFERED=1
-      - IMAGE_GEN_API_KEY=
-      - IMAGE_GEN_BASE_URL=
-      - RAG_LLM_API_KEY=
-      - RAG_LLM_BASE_URL=
-      - LLM_MODEL=
     restart: unless-stopped
     networks:
       - paper2slides-network

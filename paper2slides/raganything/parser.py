@@ -53,7 +53,7 @@ class Parser:
     # Define common file formats
     OFFICE_FORMATS = {".doc", ".docx", ".ppt", ".pptx", ".xls", ".xlsx"}
     IMAGE_FORMATS = {".png", ".jpeg", ".jpg", ".bmp", ".tiff", ".tif", ".gif", ".webp"}
-    TEXT_FORMATS = {".txt", ".md"}
+    TEXT_FORMATS = {".txt", ".md", ".markdown"}
 
     # Class-level logger
     logger = logging.getLogger(__name__)
@@ -220,7 +220,7 @@ class Parser:
                 raise FileNotFoundError(f"Text file does not exist: {text_path}")
 
             # Supported text formats
-            supported_text_formats = {".txt", ".md"}
+            supported_text_formats = {".txt", ".md", ".markdown"}
             if text_path.suffix.lower() not in supported_text_formats:
                 raise ValueError(f"Unsupported text format: {text_path.suffix}")
 
