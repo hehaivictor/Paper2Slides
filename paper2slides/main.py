@@ -28,6 +28,7 @@ os.environ.setdefault("CUDA_VISIBLE_DEVICES", "1")
 # Get project root directory (parent of paper2slides package)
 PROJECT_ROOT = Path(__file__).parent.parent
 DEFAULT_OUTPUT_DIR = str(PROJECT_ROOT / "outputs")
+DEFAULT_PRESENTATION_PROFILE = os.getenv("PAPER2SLIDES_PROFILE", "consulting_exec_cn").strip() or "consulting_exec_cn"
 
 logger = logging.getLogger(__name__)
 
@@ -46,6 +47,8 @@ def main():
                         help="Output type (default: poster)")
     parser.add_argument("--style", default="doraemon",
                         help="Style: academic, doraemon, or custom description")
+    parser.add_argument("--profile", default=DEFAULT_PRESENTATION_PROFILE,
+                        help=f"Presentation profile (default: {DEFAULT_PRESENTATION_PROFILE})")
     parser.add_argument("--length", choices=["short", "medium", "long"], default="short",
                         help="Slides length (default: short)")
     parser.add_argument("--density", choices=["sparse", "medium", "dense"], default="medium",
@@ -100,6 +103,7 @@ def main():
         "poster_density": args.density,
         "fast_mode": args.fast,
         "max_workers": args.parallel if args.parallel else 1,
+        "profile": args.profile,
     }
     
     # Determine paths

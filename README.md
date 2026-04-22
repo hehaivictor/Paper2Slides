@@ -134,7 +134,7 @@ pip install -r requirements.txt
 ```
 
 > [!NOTE]
-> Create a `.env` file in `paper2slides/` directory with your API keys. Refer to `paper2slides/.env.example` for the required variables.
+> Create a `.env` file in the repository root with your API keys. Refer to `.env.example` for the required variables.
 
 ### 2. Command Line Usage
 
@@ -163,12 +163,25 @@ python -m paper2slides --list
 | `--output` | Output type: `slides` or `poster` | `poster` |
 | `--content` | Content type: `paper` or `general` | `paper` |
 | `--style` | Style: `academic`, `doraemon`, or custom | `doraemon` |
+| `--profile` | Unified prompt profile for planning + visual defaults | `consulting_exec_cn` |
 | `--length` | Slides length: `short`, `medium`, `long` | `short` |
 | `--density` | Poster density: `sparse`, `medium`, `dense` | `medium` |
 | `--fast` | Fast mode: skip RAG indexing | `false` |
 | `--parallel` | Enable parallel slide generation: `--parallel` uses 2 workers, `--parallel N` uses N workers | `1` (sequential without this option) |
 | `--from-stage` | Force restart from stage: `rag`, `summary`, `plan`, `generate` | Auto-detect |
 | `--debug` | Enable debug logging | `false` |
+
+> [!TIP]
+> `general + slides` now defaults to the `consulting_exec_cn` profile when no caller profile is provided.  
+> The profile is unified at the configuration level, but still uses separate prompts internally for planning and image generation, so structural and visual constraints stay stage-specific.  
+> For `--content general --output slides`, the planner now applies a built-in consulting-style outline profile by default:
+> Action Title headings, executive-summary-first structure, MECE pain breakdown, root-cause analysis, solution framing, and roadmap-oriented page order.  
+> The image-generation stage also applies a built-in consulting visual profile by default: white / light-gray canvas, navy accents, restrained management-report composition, and roadmap / KPI / comparison-friendly layouts.  
+> To disable them, set `PAPER2SLIDES_DISABLE_DEFAULT_GENERAL_SLIDES_PROFILE=true` and/or `PAPER2SLIDES_DISABLE_DEFAULT_GENERAL_SLIDES_VISUAL_PROFILE=true` in `.env`.  
+> To replace them with your own fixed prompts, set:
+> `PAPER2SLIDES_PLANNING_INSTRUCTION` / `PAPER2SLIDES_PLANNING_INSTRUCTION_FILE`
+> and
+> `PAPER2SLIDES_VISUAL_STYLE_INSTRUCTION` / `PAPER2SLIDES_VISUAL_STYLE_INSTRUCTION_FILE`.
 
 **💾 Checkpoint & Resume**:
 
@@ -290,7 +303,7 @@ outputs/
 
 ### Image Generation Providers
 
-- Set `IMAGE_GEN_PROVIDER` in `paper2slides/.env` to choose the backend:
+- Set `IMAGE_GEN_PROVIDER` in `.env` to choose the backend:
   - `openrouter` (default): uses `IMAGE_GEN_API_KEY`, `IMAGE_GEN_BASE_URL`, and `IMAGE_GEN_MODEL` (default `google/gemini-3-pro-image-preview`)
   - `google`: uses the official Gemini API at `GOOGLE_GENAI_BASE_URL` (default `https://generativelanguage.googleapis.com/v1beta`), `IMAGE_GEN_API_KEY`, `IMAGE_GEN_MODEL` (default `models/gemini-3-pro-image-preview`, must be image-capable), and `IMAGE_GEN_RESPONSE_MIME_TYPE` (default `text/plain`; use text types if your model does not support image responses)
 - Reference figures are sent as inline data when supported (Google) or as `image_url` attachments (OpenRouter).

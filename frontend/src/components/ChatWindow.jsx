@@ -4,6 +4,14 @@ import MessageInput from './MessageInput'
 import ConversationList from './ConversationList'
 import ConfigPanel from './ConfigPanel'
 import { PanelLeftOpen, FileText, Download, Eye, X } from 'lucide-react'
+import {
+  DEFAULT_CONTENT_TYPE,
+  DEFAULT_OUTPUT_TYPE,
+  DEFAULT_STYLE,
+  DEFAULT_SLIDES_LENGTH,
+  DEFAULT_POSTER_DENSITY,
+  DEFAULT_FAST_MODE,
+} from '../constants/configDefaults'
 
 // Generate unique ID
 const generateId = () => `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`
@@ -21,12 +29,12 @@ const ChatWindow = () => {
   const [isLoading, setIsLoading] = useState(false)
   
   // Configuration state - matching main.py parameters
-  const [content, setContent] = useState('paper') // 'paper' or 'general'
-  const [style, setStyle] = useState('doraemon') // 'academic', 'doraemon', or custom
-  const [output, setOutput] = useState('slides') // 'slides' or 'poster'
-  const [length, setLength] = useState('medium') // 'short', 'medium', 'long' (for slides)
-  const [density, setDensity] = useState('medium') // 'sparse', 'medium', 'dense' (for poster)
-  const [fastMode, setFastMode] = useState(true) // Fast mode: parse only, no RAG indexing (only for paper content, default enabled)
+  const [content, setContent] = useState(DEFAULT_CONTENT_TYPE) // 'paper' or 'general'
+  const [style, setStyle] = useState(DEFAULT_STYLE) // 'academic', 'doraemon', or custom
+  const [output, setOutput] = useState(DEFAULT_OUTPUT_TYPE) // 'slides' or 'poster'
+  const [length, setLength] = useState(DEFAULT_SLIDES_LENGTH) // 'short', 'medium', 'long' (for slides)
+  const [density, setDensity] = useState(DEFAULT_POSTER_DENSITY) // 'sparse', 'medium', 'dense' (for poster)
+  const [fastMode, setFastMode] = useState(DEFAULT_FAST_MODE) // Fast mode: parse only, no RAG indexing (only for paper content)
   
   const [showLeftPanel, setShowLeftPanel] = useState(true)
   const [currentWorkflow, setCurrentWorkflow] = useState(null) // Now includes conversationId

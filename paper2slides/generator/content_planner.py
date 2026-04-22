@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from typing import List, Dict, Any
 from openai import OpenAI
 
-from .config import GenerationInput, OutputType
+from .config import GenerationInput, OutputType, resolve_profile_prompt
 from ..summary import FigureInfo, TableInfo
 from ..prompts.content_planning import (
     PAPER_SLIDES_PLANNING_PROMPT,
@@ -122,6 +122,7 @@ class ContentPlanner:
         self.api_key = api_key or os.getenv("RAG_LLM_API_KEY", "")
         self.base_url = base_url or os.getenv("RAG_LLM_BASE_URL")
         self.model = model
+        self.output_language = os.getenv("OUTPUT_LANGUAGE", "zh-CN")
         # max_tokens: default 16000, override via RAG_LLM_MAX_TOKENS env or constructor
         # Note: deepseek has 8192 limit, set RAG_LLM_MAX_TOKENS=8192 if using deepseek
         self.max_tokens = max_tokens or int(os.getenv("RAG_LLM_MAX_TOKENS", "16000"))
@@ -189,6 +190,7 @@ class ContentPlanner:
             summary=self._truncate(summary, 10000),
             assets_section=assets_section,
         )
+        prompt += self._language_instruction(gen_input)
         
         result = self._call_multimodal_llm(prompt, figure_images)
         return self._parse_sections(result, is_slides=True)
@@ -221,9 +223,60 @@ class ContentPlanner:
             summary=self._truncate(summary, 10000),
             assets_section=assets_section,
         )
+        prompt += self._language_instruction(gen_input)
         
         result = self._call_multimodal_llm(prompt, figure_images)
         return self._parse_sections(result, is_slides=False)
+
+    def _language_instruction(self, gen_input: GenerationInput) -> str:
+        """Force the planner to output slide text in the configured language."""
+        custom_instruction = self._custom_planning_instruction(gen_input)
+        if self.output_language.lower().startswith("zh"):
+            instruction = (
+                "\n\n## Language Requirement\n"
+                "- All slide/poster titles and body text MUST be in Simplified Chinese.\n"
+                "- Keep proper nouns, product names, APIs, model names, and technical identifiers in their original language when necessary.\n"
+                "- Do not rewrite the whole deck in English.\n"
+            )
+        else:
+            instruction = (
+            "\n\n## Language Requirement\n"
+            "- All slide/poster titles and body text MUST be in English.\n"
+            )
+
+        if custom_instruction:
+            instruction += (
+                "\n\n## User Planning Instruction\n"
+                f"{custom_instruction}\n"
+            )
+        return instruction
+
+    def _custom_planning_instruction(self, gen_input: GenerationInput) -> str:
+        """Load optional user instruction for content planning."""
+        import os
+
+        instruction = os.getenv("PAPER2SLIDES_PLANNING_INSTRUCTION", "").strip()
+        instruction_file = os.getenv("PAPER2SLIDES_PLANNING_INSTRUCTION_FILE", "").strip()
+        if instruction_file:
+            path = Path(instruction_file).expanduser()
+            if path.exists():
+                instruction = path.read_text(encoding="utf-8").strip()
+        if instruction:
+            return instruction
+        return self._default_planning_instruction(gen_input)
+
+    def _default_planning_instruction(self, gen_input: GenerationInput) -> str:
+        """Return the built-in planning profile when no explicit override is provided."""
+        import os
+
+        disabled = os.getenv("PAPER2SLIDES_DISABLE_DEFAULT_GENERAL_SLIDES_PROFILE", "").strip().lower()
+        if disabled in {"1", "true", "yes", "on"}:
+            return ""
+
+        if gen_input.config.output_type != OutputType.SLIDES or gen_input.is_paper():
+            return ""
+
+        return resolve_profile_prompt(gen_input.config.profile, "planning")
     
     def _build_assets_section(self, tables_md: str, has_figures: bool) -> str:
         """Build the tables/figures section based on available assets."""

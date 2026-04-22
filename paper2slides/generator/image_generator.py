@@ -8,6 +8,7 @@ import json
 import base64
 import time
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import List, Optional
@@ -15,7 +16,7 @@ import requests
 from openai import OpenAI
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from .config import GenerationInput
+from .config import GenerationInput, resolve_profile_prompt
 from .content_planner import ContentPlan, Section
 from ..prompts.image_generation import (
     STYLE_PROCESS_PROMPT,
@@ -95,6 +96,7 @@ class ImageGenerator:
         self.google_api_base_url = (google_api_base_url or os.getenv("GOOGLE_GENAI_BASE_URL", "https://generativelanguage.googleapis.com/v1beta")).rstrip("/")
         self.response_mime_type = response_mime_type or os.getenv("IMAGE_GEN_RESPONSE_MIME_TYPE", "text/plain")
         self.model = model or os.getenv("IMAGE_GEN_MODEL")
+        self.output_language = os.getenv("OUTPUT_LANGUAGE", "zh-CN")
         
         if not self.model:
             if self.provider == "google":
@@ -132,6 +134,7 @@ class ImageGenerator:
         figure_images = self._load_figure_images(plan, gen_input.origin.base_path)
         style_name = gen_input.config.style.value
         custom_style = gen_input.config.custom_style
+        fixed_visual_profile = self._default_visual_style_instruction(gen_input)
         
         # Process custom style with LLM if needed
         processed_style = None
@@ -144,26 +147,27 @@ class ImageGenerator:
         all_images = self._filter_images(plan.sections, figure_images)
         
         if plan.output_type == "poster":
-            result = self._generate_poster(style_name, processed_style, all_sections_md, all_images)
+            result = self._generate_poster(style_name, processed_style, all_sections_md, all_images, fixed_visual_profile)
             if save_callback and result:
                 save_callback(result[0], 0, 1)
             return result
         else:
-            return self._generate_slides(plan, style_name, processed_style, all_sections_md, figure_images, max_workers, save_callback)
-    
-    def _generate_poster(self, style_name, processed_style: Optional[ProcessedStyle], sections_md, images) -> List[GeneratedImage]:
+            return self._generate_slides(plan, style_name, processed_style, all_sections_md, figure_images, max_workers, save_callback, fixed_visual_profile)
+
+    def _generate_poster(self, style_name, processed_style: Optional[ProcessedStyle], sections_md, images, fixed_visual_profile: str = "") -> List[GeneratedImage]:
         """Generate 1 poster image."""
         prompt = self._build_poster_prompt(
             format_prefix=FORMAT_POSTER,
             style_name=style_name,
             processed_style=processed_style,
             sections_md=sections_md,
+            fixed_visual_profile=fixed_visual_profile,
         )
         
         image_data, mime_type = self._call_model(prompt, images)
         return [GeneratedImage(section_id="poster", image_data=image_data, mime_type=mime_type)]
     
-    def _generate_slides(self, plan, style_name, processed_style: Optional[ProcessedStyle], all_sections_md, figure_images, max_workers: int, save_callback=None) -> List[GeneratedImage]:
+    def _generate_slides(self, plan, style_name, processed_style: Optional[ProcessedStyle], all_sections_md, figure_images, max_workers: int, save_callback=None, fixed_visual_profile: str = "") -> List[GeneratedImage]:
         """Generate N slide images (slides 1-2 sequential, 3+ parallel)."""
         results = []
         total = len(plan.sections)
@@ -191,6 +195,7 @@ class ImageGenerator:
                 layout_rule=layout_rule,
                 slide_info=f"Slide {i+1} of {total}",
                 context_md=all_sections_md,
+                fixed_visual_profile=fixed_visual_profile,
             )
             
             section_images = self._filter_images([section], figure_images)
@@ -232,6 +237,7 @@ class ImageGenerator:
                     layout_rule=layout_rule,
                     slide_info=f"Slide {i+1} of {total}",
                     context_md=all_sections_md,
+                    fixed_visual_profile=fixed_visual_profile,
                 )
                 
                 section_images = self._filter_images([section], figure_images)
@@ -265,7 +271,7 @@ class ImageGenerator:
         """Format ProcessedStyle into style hints string for poster."""
         parts = [
             ps.style_name + ".",
-            "English text only.",
+            self._text_language_instruction(),
             "Use ROUNDED sans-serif fonts for ALL text.",
             "Characters should react to or interact with the content, with appropriate poses/actions and sizes - not just decoration."
             f"LIMITED COLOR PALETTE (3-4 colors max): {ps.color_tone}.",
@@ -279,7 +285,7 @@ class ImageGenerator:
         """Format ProcessedStyle into style hints string for slide."""
         parts = [
             ps.style_name + ".",
-            "English text only.",
+            self._text_language_instruction(),
             "Use ROUNDED sans-serif fonts for ALL text.",
             "Characters should react to or interact with the content, with appropriate poses/actions and sizes - not just decoration.",
             f"LIMITED COLOR PALETTE (3-4 colors max): {ps.color_tone}.",
@@ -289,7 +295,7 @@ class ImageGenerator:
             parts.append(ps.special_elements + ".")
         return " ".join(parts)
     
-    def _build_poster_prompt(self, format_prefix, style_name, processed_style: Optional[ProcessedStyle], sections_md) -> str:
+    def _build_poster_prompt(self, format_prefix, style_name, processed_style: Optional[ProcessedStyle], sections_md, fixed_visual_profile: str = "") -> str:
         """Build prompt for poster."""
         parts = [format_prefix]
         
@@ -301,14 +307,18 @@ class ImageGenerator:
             parts.append(POSTER_STYLE_HINTS.get(style_name, POSTER_STYLE_HINTS["academic"]))
         
         parts.append(VISUALIZATION_HINTS)
+        parts.append(self._text_language_instruction())
+        if fixed_visual_profile:
+            parts.append(fixed_visual_profile)
         parts.append(POSTER_FIGURE_HINT)
         parts.append(f"---\nContent:\n{sections_md}")
         
         return "\n\n".join(parts)
     
-    def _build_slide_prompt(self, style_name, processed_style: Optional[ProcessedStyle], sections_md, layout_rule, slide_info, context_md) -> str:
+    def _build_slide_prompt(self, style_name, processed_style: Optional[ProcessedStyle], sections_md, layout_rule, slide_info, context_md, fixed_visual_profile: str = "") -> str:
         """Build prompt for slide with layout rules and consistency."""
         parts = [FORMAT_SLIDE]
+        truncated_context = self._truncate_prompt_text(context_md, 2200)
         
         if style_name == "custom" and processed_style:
             parts.append(f"Style: {self._format_custom_style_for_slide(processed_style)}")
@@ -321,14 +331,47 @@ class ImageGenerator:
             parts.append(f"Decorations: {processed_style.decorations}")
         
         parts.append(VISUALIZATION_HINTS)
+        parts.append(self._text_language_instruction())
+        if fixed_visual_profile:
+            parts.append(fixed_visual_profile)
         parts.append(CONSISTENCY_HINT)
         parts.append(SLIDE_FIGURE_HINT)
         
         parts.append(slide_info)
-        parts.append(f"---\nFull presentation context:\n{context_md}")
+        parts.append(f"---\nPresentation context (condensed):\n{truncated_context}")
         parts.append(f"---\nThis slide content:\n{sections_md}")
         
         return "\n\n".join(parts)
+
+    def _default_visual_style_instruction(self, gen_input: GenerationInput) -> str:
+        """Return override or built-in visual profile for general slides when enabled."""
+        visual_instruction = os.getenv("PAPER2SLIDES_VISUAL_STYLE_INSTRUCTION", "").strip()
+        visual_instruction_file = os.getenv("PAPER2SLIDES_VISUAL_STYLE_INSTRUCTION_FILE", "").strip()
+        if visual_instruction_file:
+            path = Path(visual_instruction_file).expanduser()
+            if path.exists():
+                visual_instruction = path.read_text(encoding="utf-8").strip()
+        if visual_instruction:
+            return visual_instruction
+
+        disabled = os.getenv("PAPER2SLIDES_DISABLE_DEFAULT_GENERAL_SLIDES_VISUAL_PROFILE", "").strip().lower()
+        if disabled in {"1", "true", "yes", "on"}:
+            return ""
+        if gen_input.config.output_type.value != "slides" or gen_input.is_paper():
+            return ""
+        return resolve_profile_prompt(gen_input.config.profile, "visual")
+
+    def _text_language_instruction(self) -> str:
+        """Return a short prompt fragment enforcing visible text language."""
+        if self.output_language.lower().startswith("zh"):
+            return "All visible slide text must be in Simplified Chinese. Preserve proper nouns, model names, product names, and technical identifiers when needed."
+        return "All visible slide text must be in English."
+
+    def _truncate_prompt_text(self, text: str, max_chars: int) -> str:
+        """Keep image-generation context compact to avoid slow oversized prompts."""
+        if len(text) <= max_chars:
+            return text
+        return text[:max_chars] + "\n...[context truncated]..."
     
     def _format_sections_markdown(self, plan: ContentPlan) -> str:
         """Format all sections as markdown."""
@@ -410,6 +453,10 @@ class ImageGenerator:
     def _call_model_openrouter(self, prompt: str, reference_images: List[dict]) -> tuple:
         """Call the image generation model with retry logic."""
         logger = logging.getLogger(__name__)
+
+        if self.model and self.model.startswith("nano-banana"):
+            return self._call_model_openrouter_via_responses(prompt, reference_images)
+
         content = [{"type": "text", "text": prompt}]
         
         # Add each image with figure_id and caption label
@@ -479,6 +526,58 @@ class ImageGenerator:
                 raise
         
         raise RuntimeError("Image generation failed after all retry attempts")
+
+    def _call_model_openrouter_via_responses(self, prompt: str, reference_images: List[dict]) -> tuple:
+        """Fallback for gateways that expose image generation via the Responses API."""
+        logger = logging.getLogger(__name__)
+        input_content = [{"type": "input_text", "text": prompt}]
+
+        for img in reference_images:
+            if img.get("base64") and img.get("mime_type"):
+                fig_id = img.get("figure_id", "Figure")
+                caption = img.get("caption", "")
+                label = f"[{fig_id}]: {caption}" if caption else f"[{fig_id}]"
+                input_content.append({"type": "input_text", "text": label})
+                input_content.append({
+                    "type": "input_image",
+                    "image_url": f"data:{img['mime_type']};base64,{img['base64']}",
+                })
+
+        response = self.client.responses.create(
+            model=self.model,
+            input=[{"role": "user", "content": input_content}],
+            tools=[{"type": "image_generation"}],
+            timeout=120,
+        )
+
+        output_text = getattr(response, "output_text", "") or ""
+        urls = [
+            url.rstrip(").,]>")
+            for url in re.findall(r"https?://\S+", output_text)
+        ]
+        if not urls:
+            raise RuntimeError("Image generation failed - no downloadable image URL in response")
+
+        image_resp = self._download_response_image(urls[0])
+        mime_type = image_resp.headers.get("Content-Type", "image/png").split(";")[0]
+        logger.info("Image generation successful (Responses API)")
+        return image_resp.content, mime_type
+
+    def _download_response_image(self, url: str) -> requests.Response:
+        """Download generated image URL with a compatibility fallback for CDN cert mismatches."""
+        logger = logging.getLogger(__name__)
+        try:
+            image_resp = requests.get(url, timeout=120)
+            image_resp.raise_for_status()
+            return image_resp
+        except requests.exceptions.SSLError as exc:
+            logger.warning(
+                "Image URL SSL verification failed; retrying without verification for generated CDN asset: %s",
+                exc,
+            )
+            image_resp = requests.get(url, timeout=120, verify=False)
+            image_resp.raise_for_status()
+            return image_resp
     
     def _call_model_google(self, prompt: str, reference_images: List[dict]) -> tuple:
         """Call the official Google Gemini API for image generation."""

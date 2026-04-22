@@ -52,6 +52,8 @@ async def run_plan_stage(base_dir: Path, config_dir: Path, config: Dict) -> Dict
         slides_length=SlidesLength(config.get("slides_length", "medium")),
         style=StyleType(config.get("style", "academic")),
         custom_style=config.get("custom_style"),
+        output_language=config.get("output_language", "zh-CN"),
+        profile=config.get("profile", "consulting_exec_cn"),
     )
     
     gen_input = GenerationInput(config=gen_config, content=content, origin=origin)
@@ -80,4 +82,3 @@ async def run_plan_stage(base_dir: Path, config_dir: Path, config: Dict) -> Dict
     save_json(checkpoint_path, result)
     logger.info(f"  Saved: {checkpoint_path}")
     return result
-

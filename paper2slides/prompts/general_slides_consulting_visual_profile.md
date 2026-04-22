@@ -1,0 +1,21 @@
+## Fixed Visual Style Profile
+
+- The slide must look like a top-tier executive consulting deck, not a consumer infographic or cartoon poster.
+- Use a pure white or extremely light warm-gray background.
+- Use deep navy blue as the primary accent color, with dark gray body text and very restrained secondary gray tones.
+- Keep a minimal, calm, premium, businesslike tone with large whitespace and clean alignment.
+- Prefer structured layouts such as:
+  - two-column comparison
+  - three-column capability cards
+  - KPI summary blocks
+  - concise roadmap timelines
+  - risk / response matrices
+- Avoid illustration-heavy, playful, anime, comic, mascot, hand-drawn, sticker-like, childish, or overly decorative visuals.
+- Avoid dark mode, purple-dominant palettes, neon colors, textured photo backgrounds, and crowded compositions.
+- Titles must feel like Action Titles: large, bold, high-contrast, executive-summary style.
+- Body content should be organized into neat blocks with clear visual grouping, as if prepared for a management committee.
+- Charts, icons, dividers, and panels should all share one restrained visual language: thin lines, consistent navy accents, subtle gray borders.
+- When the slide includes tables or comparisons, render them like consulting report tables rather than academic posters.
+- When the slide includes a roadmap or phased plan, use clear horizontal progression with understated milestone cues.
+- Use icons sparingly and only in a formal outline style.
+- The final look should resemble a McKinsey / Bain / BCG strategy presentation adapted for Chinese business readers.

@@ -4,6 +4,7 @@ Path generation functions for checkpoints and outputs
 from pathlib import Path
 from datetime import datetime
 from typing import Dict
+import re
 
 
 def get_base_dir(output_dir: str, project_name: str, content_type: str) -> Path:
@@ -22,6 +23,7 @@ def get_config_name(config: Dict) -> str:
     """Generate config directory name: {output}_{style}_{param}."""
     output_type = config.get("output_type", "slides")
     style = config.get("style", "academic")
+    profile = str(config.get("profile", "") or "").strip()
     
     if output_type == "poster":
         param = config.get("poster_density", "medium")
@@ -34,8 +36,14 @@ def get_config_name(config: Dict) -> str:
         # Use first 16 chars of custom style
         suffix = custom[:16].replace(" ", "_").replace("/", "_") if custom else "custom"
         style = f"custom_{suffix}"
-    
-    return f"{output_type}_{style}_{param}"
+
+    profile_suffix = ""
+    if profile:
+        safe_profile = re.sub(r"[^a-zA-Z0-9_-]+", "_", profile)[:24].strip("_")
+        if safe_profile:
+            profile_suffix = f"_{safe_profile}"
+
+    return f"{output_type}_{style}_{param}{profile_suffix}"
 
 
 def get_config_dir(base_dir: Path, config: Dict) -> Path:

@@ -1,5 +1,10 @@
 import React, { useState, useEffect } from 'react'
 import { Check, X, FileText, Image, Send, Zap } from 'lucide-react'
+import {
+  DEFAULT_STYLE,
+  DEFAULT_STYLE_TYPE,
+  STYLE_OPTIONS,
+} from '../constants/configDefaults'
 
 const ConfigPanel = ({ 
   content, 
@@ -19,19 +24,22 @@ const ConfigPanel = ({
   isLoading = false
 }) => {
   const [showConfigModal, setShowConfigModal] = useState(false)
-  const [selectedStyleType, setSelectedStyleType] = useState('doraemon') // 'academic', 'doraemon', or 'custom'
-  const [customStyle, setCustomStyle] = useState('')
+  const [selectedStyleType, setSelectedStyleType] = useState(DEFAULT_STYLE_TYPE)
+  const [customStyle, setCustomStyle] = useState(DEFAULT_STYLE)
 
   // Initialize selectedStyleType based on current style
   useEffect(() => {
-    if (style === 'academic' || style === 'doraemon') {
+    if (style === DEFAULT_STYLE) {
+      setSelectedStyleType('consulting')
+      setCustomStyle(DEFAULT_STYLE)
+    } else if (style === 'academic' || style === 'doraemon') {
       setSelectedStyleType(style)
     } else if (style) {
       // It's a custom style
       setSelectedStyleType('custom')
       setCustomStyle(style)
     }
-  }, []) // Only run on mount
+  }, [style])
 
   const handleOutputSelect = (selectedOutput) => {
     setOutput(selectedOutput)
@@ -43,7 +51,10 @@ const ConfigPanel = ({
   const handleStyleSelect = (selectedStyle) => {
     setSelectedStyleType(selectedStyle)
     
-    if (selectedStyle === 'custom') {
+    if (selectedStyle === 'consulting') {
+      setCustomStyle(DEFAULT_STYLE)
+      setStyle(DEFAULT_STYLE)
+    } else if (selectedStyle === 'custom') {
       // If there's already a custom style text, use it
       if (customStyle.trim()) {
         setStyle(customStyle.trim())
@@ -365,7 +376,8 @@ const ConfigPanel = ({
                   Style
                 </label>
                 <div className="inline-flex items-center bg-gray-50 dark:bg-gray-800 border-2 border-gray-200 dark:border-gray-700 rounded-xl p-1">
-                  {['academic', 'doraemon', 'custom'].map((styleOption) => {
+                  {STYLE_OPTIONS.map(({ label, value }) => {
+                    const styleOption = value
                     const isSelected = selectedStyleType === styleOption
                     
                     return (
@@ -381,7 +393,7 @@ const ConfigPanel = ({
                         {isSelected && (
                           <Check className="w-4 h-4 inline-block mr-1" />
                         )}
-                        {styleOption === 'academic' ? 'Academic' : styleOption === 'doraemon' ? 'Doraemon' : 'Custom'}
+                        {label}
                       </button>
                     )
                   })}

@@ -6,21 +6,57 @@ import sys
 import uuid
 import asyncio
 import logging
+import os
+import threading
 from pathlib import Path
 from typing import List, Optional
+from urllib.parse import quote
 
-from fastapi import FastAPI, File, UploadFile, Form, HTTPException, BackgroundTasks
+from fastapi import FastAPI, File, UploadFile, Form, HTTPException, BackgroundTasks, Header, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from dotenv import load_dotenv
 
 logger = logging.getLogger(__name__)
+DEFAULT_CONTENT_TYPE = "general"
+DEFAULT_OUTPUT_TYPE = "slides"
+DEFAULT_STYLE = "Executive consulting deck"
+DEFAULT_SLIDES_LENGTH = "long"
+DEFAULT_POSTER_DENSITY = "medium"
+DEFAULT_PRESENTATION_PROFILE = "consulting_exec_cn"
+SUPPORTED_SOURCE_EXTENSIONS = {
+    ".pdf",
+    ".md",
+    ".markdown",
+    ".txt",
+    ".doc",
+    ".docx",
+    ".ppt",
+    ".pptx",
+    ".xls",
+    ".xlsx",
+    ".jpg",
+    ".jpeg",
+    ".png",
+    ".bmp",
+    ".tiff",
+    ".tif",
+    ".gif",
+    ".webp",
+}
 
 # Add parent directory to path to import paper2slides modules
 SCRIPT_DIR = Path(__file__).parent
 PROJECT_ROOT = SCRIPT_DIR.parent
 sys.path.insert(0, str(PROJECT_ROOT))
+for env_path in (PROJECT_ROOT / ".env", PROJECT_ROOT / "paper2slides" / ".env"):
+    if env_path.exists():
+        load_dotenv(dotenv_path=env_path, override=False)
+        break
+
+DEFAULT_PRESENTATION_PROFILE = os.getenv("PAPER2SLIDES_PROFILE", DEFAULT_PRESENTATION_PROFILE).strip() or DEFAULT_PRESENTATION_PROFILE
 
 # Import paper2slides functions
 from paper2slides.core import (
@@ -28,11 +64,13 @@ from paper2slides.core import (
     get_config_name, detect_start_stage
 )
 from paper2slides.utils.path_utils import get_project_name
-from paper2slides.utils import setup_logging
+from paper2slides.utils import setup_logging, save_json, load_json
 
 # Configuration - use project root directories
 UPLOAD_DIR = PROJECT_ROOT / "sources" / "uploads"
 OUTPUT_DIR = PROJECT_ROOT / "outputs"
+API_AUTH_TOKEN = os.getenv("API_AUTH_TOKEN", "").strip()
+PUBLIC_BASE_URL = os.getenv("PUBLIC_BASE_URL", "").rstrip("/")
 UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
 OUTPUT_DIR.mkdir(exist_ok=True)
 
@@ -46,11 +84,11 @@ class SessionManager:
     def __init__(self):
         self.running_session = None
         self.cancelled_sessions = set()  # Track cancelled session IDs
-        self.lock = asyncio.Lock()
+        self.lock = threading.Lock()
     
     async def start_session(self, session_id: str) -> bool:
         """Try to start a new session. Returns False if another session is already running"""
-        async with self.lock:
+        with self.lock:
             if self.running_session is not None:
                 return False
             self.running_session = session_id
@@ -60,14 +98,14 @@ class SessionManager:
     
     async def end_session(self, session_id: str):
         """End a session"""
-        async with self.lock:
+        with self.lock:
             if self.running_session == session_id:
                 self.running_session = None
             # Keep cancelled flag for a bit, clean up later if needed
     
     async def cancel_session(self, session_id: str) -> bool:
         """Cancel a running session. Returns True if session was running"""
-        async with self.lock:
+        with self.lock:
             if self.running_session == session_id:
                 self.cancelled_sessions.add(session_id)
                 logger.info(f"Session {session_id[:8]} marked for cancellation")
@@ -108,6 +146,74 @@ class ChatResponse(BaseModel):
     uploaded_files: Optional[List[dict]] = None
 
 
+class PresentationJobResponse(BaseModel):
+    job_id: str
+    status: str
+    status_url: str
+    result_url: str
+    cancel_url: str
+    uploaded_files: List[dict]
+
+
+async def require_api_auth(authorization: Optional[str] = Header(None)):
+    """Protect external API endpoints when API_AUTH_TOKEN is configured."""
+    if not API_AUTH_TOKEN:
+        return
+    if authorization != f"Bearer {API_AUTH_TOKEN}":
+        raise HTTPException(status_code=401, detail="Invalid or missing API token")
+
+
+def _public_url(path: str) -> str:
+    if PUBLIC_BASE_URL:
+        return f"{PUBLIC_BASE_URL}{path}"
+    return path
+
+
+def _job_result_path(session_id: str) -> Path:
+    return UPLOAD_DIR / session_id / "result.json"
+
+
+def _persist_job_result(session_id: str, result: dict):
+    result_path = _job_result_path(session_id)
+    result_path.parent.mkdir(parents=True, exist_ok=True)
+    save_json(result_path, result)
+
+
+def _load_job_result(session_id: str) -> Optional[dict]:
+    if hasattr(app.state, 'results') and session_id in app.state.results:
+        return app.state.results[session_id]
+    return load_json(_job_result_path(session_id))
+
+
+def _validate_api_choice(value: str, allowed: set[str], field_name: str):
+    if value not in allowed:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Invalid {field_name}: {value}. Allowed values: {', '.join(sorted(allowed))}",
+        )
+
+
+def _normalize_profile(profile: Optional[str]) -> str:
+    """Normalize empty profile input to the consulting default."""
+    return str(profile or "").strip() or DEFAULT_PRESENTATION_PROFILE
+
+
+def _normalize_style_request(style: Optional[str], message: str = "") -> tuple[str, Optional[str]]:
+    """Normalize incoming style to generator style/custom_style values."""
+    predefined_styles = {"academic", "doraemon"}
+
+    if message and message.strip():
+        return "custom", message.strip()
+
+    normalized = str(style or "").strip()
+    lowered = normalized.lower()
+    if lowered in predefined_styles:
+        return lowered, None
+    if lowered == "consulting" or not normalized:
+        return "custom", DEFAULT_STYLE
+    return "custom", normalized
+
+
 @app.get("/")
 async def root():
     return {"message": "Paper2Slides API Server", "status": "running"}
@@ -116,6 +222,140 @@ async def root():
 @app.get("/health")
 async def health():
     return {"status": "healthy"}
+
+
+@app.get("/api/v1/capabilities", dependencies=[Depends(require_api_auth)])
+async def get_capabilities():
+    """Describe the stable service API surface for external callers."""
+    return {
+        "service": "paper2slides",
+        "supported_source_extensions": sorted(SUPPORTED_SOURCE_EXTENSIONS),
+        "content_types": ["paper", "general"],
+        "output_types": ["slides", "poster"],
+        "styles": ["consulting", "academic", "doraemon", "custom"],
+        "profiles": [DEFAULT_PRESENTATION_PROFILE],
+        "default_profile": DEFAULT_PRESENTATION_PROFILE,
+        "slides_lengths": ["short", "medium", "long"],
+        "poster_densities": ["sparse", "medium", "dense"],
+        "artifacts": ["slides.pdf", "slide images", "poster image"],
+    }
+
+
+async def _save_uploaded_files(session_id: str, files: List[UploadFile]) -> List[dict]:
+    if not files:
+        raise HTTPException(status_code=400, detail="At least one source file is required")
+
+    session_dir = UPLOAD_DIR / session_id
+    session_dir.mkdir(exist_ok=True)
+    saved_files = []
+    unsupported = []
+
+    for file in files:
+        if not file.filename:
+            continue
+
+        original_name = Path(file.filename).name
+        suffix = Path(original_name).suffix.lower()
+        if suffix not in SUPPORTED_SOURCE_EXTENSIONS:
+            unsupported.append(original_name)
+            continue
+
+        file_path = session_dir / original_name
+        chunk_size = 1024 * 1024
+        with open(file_path, "wb") as buffer:
+            while chunk := file.file.read(chunk_size):
+                buffer.write(chunk)
+
+        saved_files.append({
+            "filename": original_name,
+            "path": str(file_path),
+            "size": file_path.stat().st_size,
+        })
+        logger.info(f"Saved service upload: {file_path}")
+
+    if unsupported:
+        raise HTTPException(
+            status_code=400,
+            detail={
+                "message": "Unsupported source file type",
+                "unsupported_files": unsupported,
+                "supported_extensions": sorted(SUPPORTED_SOURCE_EXTENSIONS),
+            },
+        )
+
+    if not saved_files:
+        raise HTTPException(status_code=400, detail="No valid source files were uploaded")
+
+    return saved_files
+
+
+@app.post("/api/v1/presentations", response_model=PresentationJobResponse, dependencies=[Depends(require_api_auth)])
+async def create_presentation_job(
+    background_tasks: BackgroundTasks,
+    content: str = Form(DEFAULT_CONTENT_TYPE),
+    output_type: str = Form(DEFAULT_OUTPUT_TYPE),
+    style: str = Form(DEFAULT_STYLE),
+    style_prompt: str = Form(""),
+    profile: str = Form(DEFAULT_PRESENTATION_PROFILE),
+    length: Optional[str] = Form(DEFAULT_SLIDES_LENGTH),
+    density: Optional[str] = Form(DEFAULT_POSTER_DENSITY),
+    fast_mode: bool = Form(False),
+    files: List[UploadFile] = File(...),
+):
+    """
+    Stable external integration endpoint.
+
+    It accepts source documents, starts the pipeline asynchronously, and returns
+    a job id for polling status and downloading generated artifacts.
+    """
+    _validate_api_choice(content, {"paper", "general"}, "content")
+    _validate_api_choice(output_type, {"slides", "poster"}, "output_type")
+    if length is not None:
+        _validate_api_choice(length, {"short", "medium", "long"}, "length")
+    if density is not None:
+        _validate_api_choice(density, {"sparse", "medium", "dense"}, "density")
+
+    running_session = session_manager.get_running_session()
+    if running_session:
+        raise HTTPException(
+            status_code=409,
+            detail=f"Another generation job is already running: {running_session[:8]}",
+        )
+
+    session_id = str(uuid.uuid4())
+    saved_files = await _save_uploaded_files(session_id, files)
+    _persist_job_result(session_id, {"status": "queued"})
+
+    background_tasks.add_task(
+        run_pipeline_background_sync,
+        session_id,
+        style_prompt,
+        _normalize_profile(profile),
+        saved_files,
+        content,
+        output_type,
+        style,
+        length,
+        density,
+        fast_mode,
+        session_manager,
+    )
+
+    return {
+        "job_id": session_id,
+        "status": "queued",
+        "status_url": _public_url(f"/api/v1/presentations/{session_id}"),
+        "result_url": _public_url(f"/api/v1/presentations/{session_id}/result"),
+        "cancel_url": _public_url(f"/api/v1/presentations/{session_id}/cancel"),
+        "uploaded_files": [
+            {
+                "name": f["filename"],
+                "size": f["size"],
+                "url": _public_url(f"/uploads/{session_id}/{quote(f['filename'])}"),
+            }
+            for f in saved_files
+        ],
+    }
 
 
 @app.get("/api/session/running")
@@ -142,13 +382,20 @@ async def cancel_session(session_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.post("/api/v1/presentations/{job_id}/cancel", dependencies=[Depends(require_api_auth)])
+async def cancel_presentation_job(job_id: str):
+    """Cancel a running external presentation generation job."""
+    return await cancel_session(job_id)
+
+
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat(
     background_tasks: BackgroundTasks,
     message: str = Form(""),
-    content: str = Form("paper"),  # 'paper' or 'general'
-    output_type: str = Form("slides"),  # 'slides' or 'poster'
-    style: str = Form("doraemon"),  # 'academic', 'doraemon', or custom description
+    content: str = Form(DEFAULT_CONTENT_TYPE),  # 'paper' or 'general'
+    output_type: str = Form(DEFAULT_OUTPUT_TYPE),  # 'slides' or 'poster'
+    style: str = Form(DEFAULT_STYLE),  # 'academic', 'doraemon', or custom description
+    profile: str = Form(DEFAULT_PRESENTATION_PROFILE),  # unified prompt profile
     length: Optional[str] = Form(None),  # 'short', 'medium', 'long' (for slides)
     density: Optional[str] = Form(None),  # 'sparse', 'medium', 'dense' (for poster)
     fast_mode: Optional[str] = Form(None),  # 'true' or 'false' - fast mode for paper content
@@ -243,6 +490,7 @@ async def chat(
         for f in saved_files:
             print(f"  - {f['filename']} ({f['size']} bytes)")
         print(f"Config: {output_type} | {style} | {content}")
+        print(f"  Profile: {_normalize_profile(profile)}")
         if length:
             print(f"  Length: {length}")
         if density:
@@ -270,9 +518,10 @@ async def chat(
         
         # Start the pipeline in background
         background_tasks.add_task(
-            run_pipeline_background,
+            run_pipeline_background_sync,
             session_id,
             message,
+            _normalize_profile(profile),
             saved_files,
             content,
             output_type,
@@ -291,9 +540,18 @@ async def chat(
         raise HTTPException(status_code=500, detail=f"Error processing request: {str(e)}")
 
 
+def _get_source_files(files: List[dict]) -> List[dict]:
+    """Return uploaded files that are valid source documents."""
+    return [
+        f for f in files
+        if Path(f["filename"]).suffix.lower() in SUPPORTED_SOURCE_EXTENSIONS
+    ]
+
+
 async def generate_slides_with_pipeline(
     session_id: str,
     message: str, 
+    profile: str,
     files: List[dict], 
     content: str, 
     output_type: str, 
@@ -320,48 +578,30 @@ async def generate_slides_with_pipeline(
     Returns:
         Dictionary with slides info and output paths
     """
-    # Find PDF files (support multiple PDFs in one session)
-    pdf_files = [f for f in files if f['filename'].lower().endswith('.pdf')]
-    if not pdf_files:
-        raise ValueError("No PDF file found in uploaded files")
+    source_files = _get_source_files(files)
+    if not source_files:
+        raise ValueError("No supported source file found in uploaded files")
     
-    # Parse style and message
-    # Priority: message > style parameter
-    PREDEFINED_STYLES = {"academic", "doraemon"}
+    style_type, custom_style = _normalize_style_request(style, message)
+    normalized_profile = _normalize_profile(profile)
     
-    if message and message.strip():
-        # If user provided message, use it as custom style description
-        style_type = "custom"
-        custom_style = message.strip()
-    elif style.lower() in PREDEFINED_STYLES:
-        # Use predefined style
-        style_type = style.lower()
-        custom_style = None
-    else:
-        # Use style parameter as custom description
-        style_type = "custom"
-        custom_style = style
-    
-    # Handle multiple PDFs: all paths in a list
-    pdf_paths = [f['path'] for f in pdf_files]
+    source_paths = [f['path'] for f in source_files]
     
     # Determine paths (using session-based directory for multiple PDFs)
-    if len(pdf_paths) > 1:
+    if len(source_paths) > 1:
         # Multiple PDFs: use session_id as the identifier
         project_name = f"session_{session_id[:8]}"
         # Use session directory as input_path for multiple files
-        input_path = str(Path(pdf_paths[0]).parent)
-        print(f"Processing {len(pdf_paths)} PDFs as a single project")
+        input_path = str(Path(source_paths[0]).parent)
+        print(f"Processing {len(source_paths)} source files as a single project")
     else:
-        # Single PDF: use pdf name
-        project_name = get_project_name(pdf_paths[0])
-        # Use the single PDF path as input_path
-        input_path = pdf_paths[0]
+        project_name = get_project_name(source_paths[0])
+        input_path = source_paths[0]
     
     # Build config matching main.py format
     config = {
         "input_path": input_path,  # Required by RAG stage
-        "pdf_paths": pdf_paths,  # Support multiple PDFs
+        "source_paths": source_paths,
         "content_type": content,
         "output_type": output_type,
         "style": style_type,
@@ -369,6 +609,8 @@ async def generate_slides_with_pipeline(
         "slides_length": length or "medium",
         "poster_density": density or "medium",
         "fast_mode": fast_mode if content == "paper" else False,  # Fast mode only for paper content
+        "output_language": os.getenv("OUTPUT_LANGUAGE", "zh-CN"),
+        "profile": normalized_profile,
     }
     
     base_dir = get_base_dir(str(OUTPUT_DIR), project_name, content)
@@ -376,11 +618,12 @@ async def generate_slides_with_pipeline(
     
     print(f"\nPipeline Configuration:")
     print(f"  Project: {project_name}")
-    print(f"  PDFs: {len(pdf_paths)}")
-    for i, path in enumerate(pdf_paths, 1):
+    print(f"  Files: {len(source_paths)}")
+    for i, path in enumerate(source_paths, 1):
         print(f"    [{i}] {Path(path).name}")
     if message and message.strip():
         print(f"  Message: {message}")
+    print(f"  Profile: {normalized_profile}")
     print(f"  Output: {base_dir}")
     print(f"  Config: {config_dir.name}")
     
@@ -434,6 +677,7 @@ def _update_state_on_error(
     session_id: str,
     error_msg: str,
     files: List[dict],
+    profile: str,
     content: str,
     output_type: str,
     style: str,
@@ -445,30 +689,31 @@ def _update_state_on_error(
     from paper2slides.core.state import load_state, save_state
     import json
     
-    # Find PDF files
-    pdf_files = [f for f in files if f['filename'].lower().endswith('.pdf')]
-    if not pdf_files:
+    source_files = _get_source_files(files)
+    if not source_files:
         return
     
-    pdf_paths = [f['path'] for f in pdf_files]
-    if len(pdf_paths) > 1:
+    source_paths = [f['path'] for f in source_files]
+    if len(source_paths) > 1:
         project_name = f"session_{session_id[:8]}"
     else:
-        project_name = get_project_name(pdf_paths[0])
+        project_name = get_project_name(source_paths[0])
     
     # Determine which stage failed by checking state file
     base_dir = get_base_dir(str(OUTPUT_DIR), project_name, content)
     
     # Build config to find config_dir
-    PREDEFINED_STYLES = {"academic", "doraemon"}
-    style_type = style.lower() if style.lower() in PREDEFINED_STYLES else "custom"
+    style_type, custom_style = _normalize_style_request(style)
     
     config = {
         "output_type": output_type,
         "style": style_type,
+        "custom_style": custom_style,
         "slides_length": length or "medium",
         "poster_density": density or "medium",
         "fast_mode": fast_mode if content == "paper" else False,
+        "output_language": os.getenv("OUTPUT_LANGUAGE", "zh-CN"),
+        "profile": _normalize_profile(profile),
     }
     
     config_dir = get_config_dir(base_dir, config)
@@ -489,6 +734,7 @@ def _update_state_on_error(
 async def run_pipeline_background(
     session_id: str,
     message: str,
+    profile: str,
     files: List[dict],
     content: str,
     output_type: str,
@@ -514,7 +760,7 @@ async def run_pipeline_background(
         
         logger.info(f"Starting background pipeline for session {session_id[:8]}")
         result = await generate_slides_with_pipeline(
-            session_id, message, files, content, output_type, style, length, density, fast_mode, session_manager
+            session_id, message, profile, files, content, output_type, style, length, density, fast_mode, session_manager
         )
         
         # Check if cancelled after completion
@@ -528,6 +774,7 @@ async def run_pipeline_background(
         if not hasattr(app.state, 'results'):
             app.state.results = {}
         app.state.results[session_id] = result
+        _persist_job_result(session_id, result)
         
     except Exception as e:
         logger.error(f"Background pipeline failed for session {session_id[:8]}: {e}", exc_info=True)
@@ -535,16 +782,22 @@ async def run_pipeline_background(
         if not hasattr(app.state, 'results'):
             app.state.results = {}
         app.state.results[session_id] = {"error": str(e)}
+        _persist_job_result(session_id, {"error": str(e)})
         
         # Also update the state.json file to reflect the failure
         try:
-            _update_state_on_error(session_id, str(e), files, content, output_type, style, length, density, fast_mode)
+            _update_state_on_error(session_id, str(e), files, profile, content, output_type, style, length, density, fast_mode)
         except Exception as state_err:
             logger.error(f"Failed to update state file: {state_err}")
     finally:
         # Always end the session when done (success or failure)
         await session_manager.end_session(session_id)
         logger.info(f"Session {session_id[:8]} ended")
+
+
+def run_pipeline_background_sync(*args, **kwargs):
+    """Run async pipeline work in a worker thread so FastAPI stays responsive."""
+    asyncio.run(run_pipeline_background(*args, **kwargs))
 
 
 @app.get("/api/status/{session_id}")
@@ -556,16 +809,15 @@ async def get_status(session_id: str):
         if not session_dir.exists():
             raise HTTPException(status_code=404, detail=f"Session {session_id} not found")
         
-        # Get PDF files from session
-        pdf_files = list(session_dir.glob("*.pdf"))
-        if not pdf_files:
+        source_files = [p for p in session_dir.iterdir() if p.is_file() and p.suffix.lower() in SUPPORTED_SOURCE_EXTENSIONS]
+        if not source_files:
             return {"session_id": session_id, "status": "no_files", "stages": {}}
         
         # Determine project name and paths
-        if len(pdf_files) > 1:
+        if len(source_files) > 1:
             project_name = f"session_{session_id[:8]}"
         else:
-            project_name = get_project_name(str(pdf_files[0]))
+            project_name = get_project_name(str(source_files[0]))
         
         # Try to find the state file matching session_id
         from paper2slides.core.paths import get_base_dir
@@ -643,13 +895,76 @@ async def get_status(session_id: str):
         raise HTTPException(status_code=500, detail=str(e))
 
 
+@app.get("/api/v1/presentations/{job_id}", dependencies=[Depends(require_api_auth)])
+async def get_presentation_job_status(job_id: str):
+    """Get external presentation generation job status."""
+    return await get_status(job_id)
+
+
+def _build_external_result(session_id: str, result: dict) -> dict:
+    if "error" in result:
+        raise HTTPException(status_code=500, detail=result["error"])
+
+    artifacts = []
+    primary_artifact = None
+
+    for output_file in result.get("output_files", []):
+        filename = output_file["filename"]
+        relative_path = output_file["relative_path"]
+        download_path = f"/api/download/{quote(relative_path, safe='/')}"
+
+        if filename == "slides.pdf":
+            artifact_type = "slides_pdf"
+        elif filename.lower().endswith((".png", ".jpg", ".jpeg", ".webp")):
+            artifact_type = "image"
+        else:
+            artifact_type = "file"
+
+        artifact = {
+            "filename": filename,
+            "type": artifact_type,
+            "url": _public_url(download_path),
+            "preview_url": _public_url(f"/outputs/{quote(relative_path, safe='/')}"),
+        }
+        artifacts.append(artifact)
+
+        if primary_artifact is None or artifact_type == "slides_pdf":
+            primary_artifact = artifact
+
+    return {
+        "job_id": session_id,
+        "status": "completed",
+        "output_dir": result.get("output_dir"),
+        "num_files": result.get("num_files", len(artifacts)),
+        "primary_artifact": primary_artifact,
+        "artifacts": artifacts,
+    }
+
+
+@app.get("/api/v1/presentations/{job_id}/result", dependencies=[Depends(require_api_auth)])
+async def get_presentation_job_result(job_id: str):
+    """Get generated artifacts for an external presentation job."""
+    result = _load_job_result(job_id)
+    if not result:
+        return JSONResponse(
+            status_code=202,
+            content={"message": "Result not ready yet", "job_id": job_id},
+        )
+    if result.get("status") == "queued":
+        return JSONResponse(
+            status_code=202,
+            content={"message": "Result not ready yet", "job_id": job_id, "status": "queued"},
+        )
+    return _build_external_result(job_id, result)
+
+
 @app.get("/api/result/{session_id}")
 async def get_result(session_id: str):
     """Get the final result for a completed session"""
     try:
         # Check if result is in cache
-        if hasattr(app.state, 'results') and session_id in app.state.results:
-            result = app.state.results[session_id]
+        result = _load_job_result(session_id)
+        if result:
             
             if "error" in result:
                 raise HTTPException(status_code=500, detail=result["error"])
@@ -664,11 +979,11 @@ async def get_result(session_id: str):
             
             # Get output_type from state
             session_dir = UPLOAD_DIR / session_id
-            pdf_files = list(session_dir.glob("*.pdf"))
-            if len(pdf_files) > 1:
+            source_files = [p for p in session_dir.iterdir() if p.is_file() and p.suffix.lower() in SUPPORTED_SOURCE_EXTENSIONS]
+            if len(source_files) > 1:
                 project_name = f"session_{session_id[:8]}"
             else:
-                project_name = get_project_name(str(pdf_files[0]))
+                project_name = get_project_name(str(source_files[0]))
             
             # Try to get output type from state
             from paper2slides.core.paths import get_base_dir
@@ -770,4 +1085,3 @@ if __name__ == "__main__":
         limit_concurrency=10,    
         limit_max_requests=1000  
     )
-

@@ -4,6 +4,7 @@ Path handling utilities
 from pathlib import Path
 
 PREDEFINED_STYLES = {"academic", "doraemon"}
+DEFAULT_CONSULTING_STYLE = "Executive consulting deck"
 
 
 def normalize_input_path(input_path: str) -> str:
@@ -30,8 +31,10 @@ def get_project_name(input_path: str) -> str:
 
 def parse_style(style_str: str) -> tuple:
     """Parse style string into style type and custom style."""
-    if style_str.lower() in PREDEFINED_STYLES:
-        return style_str.lower(), None
-    else:
-        return "custom", style_str
-
+    normalized = str(style_str or "").strip()
+    lowered = normalized.lower()
+    if lowered in PREDEFINED_STYLES:
+        return lowered, None
+    if lowered == "consulting":
+        return "custom", DEFAULT_CONSULTING_STYLE
+    return "custom", normalized
