@@ -57,6 +57,7 @@ Desktop.ini
 # Runtime data
 sources/
 outputs/
+outputs_*/
 
 # Temporary and test files
 debug.*

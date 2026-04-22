@@ -16,13 +16,17 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from dotenv import load_dotenv
 
-# Add project root directory to Python path
-sys.path.insert(0, str(Path(__file__).parent.parent))
+PACKAGE_ROOT = Path(__file__).parent.parent
+REPO_ROOT = PACKAGE_ROOT.parent
 
-# Load environment variables from .env file BEFORE importing LightRAG
-# This is critical for TIKTOKEN_CACHE_DIR to work properly in offline environments
-# The OS environment variables take precedence over the .env file
-load_dotenv(dotenv_path=".env", override=False)
+# Add project root directory to Python path
+sys.path.insert(0, str(PACKAGE_ROOT))
+
+# Load environment variables from repo root first so CLI/backend share one config file.
+for env_path in (REPO_ROOT / ".env", PACKAGE_ROOT / ".env"):
+    if env_path.exists():
+        load_dotenv(dotenv_path=env_path, override=False)
+        break
 
 from lightrag import LightRAG
 from lightrag.utils import logger

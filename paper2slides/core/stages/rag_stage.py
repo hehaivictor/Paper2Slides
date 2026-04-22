@@ -13,6 +13,47 @@ from ...utils import save_json
 from ..paths import get_rag_checkpoint
 
 logger = logging.getLogger(__name__)
+TEXT_INPUT_EXTENSIONS = {".md", ".markdown", ".txt"}
+
+
+def _is_direct_markdown_input(path: Path) -> bool:
+    """Return True when the input can be consumed directly as markdown/text."""
+    return path.is_file() and path.suffix.lower() in TEXT_INPUT_EXTENSIONS
+
+
+def _collect_direct_markdown_paths(path: Path) -> List[str]:
+    """Collect markdown/text files from a file or directory input."""
+    if path.is_file():
+        return [str(path)]
+    paths = []
+    for ext in TEXT_INPUT_EXTENSIONS:
+        paths.extend(str(p) for p in sorted(path.rglob(f"*{ext}")))
+    return paths
+
+
+def _load_markdown_content_parts(markdown_paths: List[str]) -> Tuple[List[Dict], int]:
+    """Load markdown files and inline local images in their original positions."""
+    all_content_parts: List[Dict] = []
+    total_images = 0
+
+    for md_path in markdown_paths:
+        base_path = str(Path(md_path).parent)
+
+        if len(markdown_paths) > 1:
+            all_content_parts.append({
+                "type": "text",
+                "text": f"\n\n=== {Path(md_path).name} ===\n\n",
+            })
+
+        with open(md_path, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        content_parts, img_count = _replace_images_with_base64(content, base_path)
+        all_content_parts.extend(content_parts)
+        total_images += img_count
+        logger.info(f"  {Path(md_path).name}: embedded {img_count} images")
+
+    return all_content_parts, total_images
 
 
 def _get_image_mime_type(image_path: str) -> str:
@@ -138,30 +179,7 @@ async def _run_fast_queries_by_category(
     """
     # Process all markdown files and embed images at original positions
     logger.info("Processing markdown files and embedding images...")
-    
-    all_content_parts = []
-    total_images = 0
-    
-    for md_path in markdown_paths:
-        base_path = str(Path(md_path).parent)
-        
-        # Add document separator if multiple files
-        if len(markdown_paths) > 1:
-            all_content_parts.append({
-                "type": "text",
-                "text": f"\n\n=== {Path(md_path).name} ===\n\n"
-            })
-        
-        with open(md_path, 'r', encoding='utf-8') as f:
-            content = f.read()
-        
-        # Replace images with base64 at original positions
-        content_parts, img_count = _replace_images_with_base64(content, base_path)
-        all_content_parts.extend(content_parts)
-        total_images += img_count
-        
-        logger.info(f"  {Path(md_path).name}: embedded {img_count} images")
-    
+    all_content_parts, total_images = _load_markdown_content_parts(markdown_paths)
     logger.info(f"Total embedded images: {total_images}")
     
     semaphore = asyncio.Semaphore(max_concurrency)
@@ -253,6 +271,63 @@ Please provide a detailed answer based on the content and images above."""
     return results_by_category
 
 
+async def _run_direct_queries(
+    client,
+    markdown_paths: List[str],
+    queries: List[str],
+    model: str,
+    system_prompt: str,
+    max_concurrency: int = 8,
+) -> List[Dict]:
+    """Query markdown/text content directly without building a RAG index."""
+    logger.info("Processing markdown files and embedding images...")
+    all_content_parts, total_images = _load_markdown_content_parts(markdown_paths)
+    logger.info(f"Total embedded images: {total_images}")
+
+    semaphore = asyncio.Semaphore(max_concurrency)
+
+    async def query_one(idx: int, query: str):
+        async with semaphore:
+            try:
+                messages = [{"role": "system", "content": system_prompt}]
+                user_content = [{"type": "text", "text": "# Document Content\n\n"}]
+                user_content.extend(all_content_parts)
+                user_content.append({
+                    "type": "text",
+                    "text": f"\n\n# Question\n\n{query}\n\nPlease answer in detail based only on the content above.",
+                })
+                messages.append({"role": "user", "content": user_content})
+
+                response = await asyncio.to_thread(
+                    lambda: client.chat.completions.create(
+                        model=model,
+                        messages=messages,
+                        temperature=0.3,
+                    )
+                )
+                answer = response.choices[0].message.content
+                return idx, {
+                    "query": query,
+                    "answer": answer,
+                    "mode": "direct_markdown_with_vision",
+                    "success": True,
+                }
+            except Exception as e:
+                logger.error(f"Query failed: {query[:50]}... Error: {e}")
+                return idx, {
+                    "query": query,
+                    "answer": None,
+                    "mode": "direct_markdown_with_vision",
+                    "success": False,
+                    "error": str(e),
+                }
+
+    tasks = [query_one(idx, query) for idx, query in enumerate(queries)]
+    results = await asyncio.gather(*tasks)
+    results.sort(key=lambda x: x[0])
+    return [result for _, result in results]
+
+
 async def run_rag_stage(base_dir: Path, config: Dict) -> Dict:
     """Stage 1: Index document and run RAG queries.
     
@@ -276,6 +351,58 @@ async def run_rag_stage(base_dir: Path, config: Dict) -> Dict:
     # Determine storage directory
     output_dir = base_dir / "rag_output"
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    if _is_direct_markdown_input(path):
+        from openai import OpenAI
+        from paper2slides.rag import RAG_PAPER_QUERIES
+        markdown_paths = _collect_direct_markdown_paths(path)
+        if not markdown_paths:
+            raise ValueError("No markdown/text files found for direct processing")
+
+        api_key = os.getenv("RAG_LLM_API_KEY", "")
+        base_url = os.getenv("RAG_LLM_BASE_URL")
+        model = os.getenv("LLM_MODEL", "gpt-4o-mini")
+        client = OpenAI(api_key=api_key, base_url=base_url)
+
+        logger.info("Running in DIRECT MARKDOWN mode (skip parser/RAG indexing)")
+        logger.info(f"  Found {len(markdown_paths)} markdown/text file(s)")
+
+        if content_type == "paper":
+            rag_results = await _run_fast_queries_by_category(
+                client=client,
+                markdown_content="",
+                markdown_paths=markdown_paths,
+                queries_by_category=RAG_PAPER_QUERIES,
+                model=model,
+            )
+        else:
+            summary_prompt = (
+                "Please analyze this markdown document and produce a detailed structured summary in Simplified Chinese. "
+                "Preserve all important business facts, priorities, dates, stages, numerical values, user pain points, process steps, "
+                "risks, constraints, and proposed actions. Organize the answer with clear Chinese headings and concise but information-dense paragraphs. "
+                "Do not invent content that is not supported by the source."
+            )
+            query_results = await _run_direct_queries(
+                client=client,
+                markdown_paths=markdown_paths,
+                queries=[summary_prompt],
+                model=model,
+                system_prompt="You are an expert at analyzing business and technical documents. Answer in Simplified Chinese based only on the provided content.",
+            )
+            rag_results = {"content": query_results}
+
+        result = {
+            "rag_results": rag_results,
+            "markdown_paths": markdown_paths,
+            "input_path": input_path,
+            "content_type": content_type,
+            "mode": "direct_markdown",
+        }
+        checkpoint_path = get_rag_checkpoint(base_dir, config)
+        checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+        save_json(checkpoint_path, result)
+        logger.info(f"  Saved: {checkpoint_path}")
+        return result
     
     # ========== FAST MODE: Parse only, no indexing ==========
     if fast_mode:

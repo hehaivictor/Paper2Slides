@@ -31,7 +31,7 @@ echo ""
 check_dependencies() {
     local missing=0
     
-    if ! command -v python3 >/dev/null 2>&1 && ! command -v python >/dev/null 2>&1; then
+    if [ ! -x "$PROJECT_ROOT/.venv/bin/python" ] && ! command -v python3 >/dev/null 2>&1 && ! command -v python >/dev/null 2>&1; then
         echo "❌ Error: Python not found (python or python3)"
         echo "   Please install Python: https://www.python.org/downloads/"
         missing=1
@@ -96,7 +96,15 @@ while [ $RETRY_COUNT -lt $MAX_RETRIES ]; do
     echo "Starting backend on port $BACKEND_PORT (attempt $((RETRY_COUNT + 1))/$MAX_RETRIES)..."
     
     cd "$PROJECT_ROOT/api"
-    python server.py $BACKEND_PORT > "$LOG_FILE" 2>&1 &
+    if [ -x "$PROJECT_ROOT/.venv/bin/python" ]; then
+        PYTHON_BIN="$PROJECT_ROOT/.venv/bin/python"
+    elif command -v python3 >/dev/null 2>&1; then
+        PYTHON_BIN="$(command -v python3)"
+    else
+        PYTHON_BIN="$(command -v python)"
+    fi
+
+    "$PYTHON_BIN" server.py $BACKEND_PORT > "$LOG_FILE" 2>&1 &
     BACKEND_PID=$!
     cd "$PROJECT_ROOT"
     
@@ -165,4 +173,3 @@ npm run dev
 
 # Cleanup on exit
 trap "echo ''; echo 'Stopping services...'; kill $BACKEND_PID 2>/dev/null; exit" INT TERM
-
