@@ -304,14 +304,15 @@ outputs/
 ### Image Generation Providers
 
 - Set `IMAGE_GEN_PROVIDER` in `.env` to choose the backend:
-  - `openrouter` (default): uses `IMAGE_GEN_API_KEY`, `IMAGE_GEN_BASE_URL`, and `IMAGE_GEN_MODEL` (default `google/gemini-3-pro-image-preview`)
+  - `openrouter` (default): uses `IMAGE_GEN_API_KEY`, `IMAGE_GEN_BASE_URL`, and `IMAGE_GEN_MODEL` (configured as `pro/gpt-image-2` on `https://modelhub.wuhancloud.cn/v1` in `.env.example`)
   - `google`: uses the official Gemini API at `GOOGLE_GENAI_BASE_URL` (default `https://generativelanguage.googleapis.com/v1beta`), `IMAGE_GEN_API_KEY`, `IMAGE_GEN_MODEL` (default `models/gemini-3-pro-image-preview`, must be image-capable), and `IMAGE_GEN_RESPONSE_MIME_TYPE` (default `text/plain`; use text types if your model does not support image responses)
-- Reference figures are sent as inline data when supported (Google) or as `image_url` attachments (OpenRouter).
+- `gpt-image-*` models use the OpenAI-compatible Images API: `/images/generations` for text-only generation and `/images/edits` when reference figures/style images are present. `IMAGE_GEN_SIZE` controls the requested upstream size, while `IMAGE_OUTPUT_SIZE` and `IMAGE_OUTPUT_FIT` normalize saved images to a filled 16:9 canvas (`1920x1080`, `stretch` by default).
+- Reference figures are sent as inline data when supported (Google), as `image_url` attachments for chat-style OpenRouter models, or as multipart images for `gpt-image-*` edits.
 
 ### Image Generation Notes
 
 > [!TIP]
-> By default Paper2Slides uses `gemini-3-pro-image-preview` (OpenRouter) for image generation; you can switch to an image-capable Google Gemini model (e.g., `models/gemini-1.5-flash`) via `IMAGE_GEN_PROVIDER=google`. Key findings:
+> By default Paper2Slides uses the OpenAI-compatible image channel configured in `.env.example` (`pro/gpt-image-2` via ModelHub); you can switch to an image-capable Google Gemini model (e.g., `models/gemini-1.5-flash`) via `IMAGE_GEN_PROVIDER=google`. Key findings:
 > 
 > - **Mood Keywords**: Words like "warm", "elegant", "vibrant" strongly influence the overall color palette
 > - **Layout vs Style**: Fine-grained *layout* instructions ground well; fine-grained *element styling* does not

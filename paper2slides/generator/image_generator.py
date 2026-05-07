@@ -97,6 +97,8 @@ class ImageGenerator:
         self.response_mime_type = response_mime_type or os.getenv("IMAGE_GEN_RESPONSE_MIME_TYPE", "text/plain")
         self.model = model or os.getenv("IMAGE_GEN_MODEL")
         self.output_language = os.getenv("OUTPUT_LANGUAGE", "zh-CN")
+        self.output_image_size = os.getenv("IMAGE_OUTPUT_SIZE", "1920x1080")
+        self.output_image_fit = os.getenv("IMAGE_OUTPUT_FIT", "stretch").lower()
         
         if not self.model:
             if self.provider == "google":
@@ -447,12 +449,17 @@ class ImageGenerator:
     def _call_model(self, prompt: str, reference_images: List[dict]) -> tuple:
         """Call image generation provider based on configuration."""
         if self.provider == "google":
-            return self._call_model_google(prompt, reference_images)
-        return self._call_model_openrouter(prompt, reference_images)
+            image_data, mime_type = self._call_model_google(prompt, reference_images)
+        else:
+            image_data, mime_type = self._call_model_openrouter(prompt, reference_images)
+        return self._normalize_generated_image(image_data, mime_type)
     
     def _call_model_openrouter(self, prompt: str, reference_images: List[dict]) -> tuple:
         """Call the image generation model with retry logic."""
         logger = logging.getLogger(__name__)
+
+        if self._uses_openai_image_api():
+            return self._call_model_openai_image_api(prompt, reference_images)
 
         if self.model and self.model.startswith("nano-banana"):
             return self._call_model_openrouter_via_responses(prompt, reference_images)
@@ -526,6 +533,201 @@ class ImageGenerator:
                 raise
         
         raise RuntimeError("Image generation failed after all retry attempts")
+
+    def _uses_openai_image_api(self) -> bool:
+        """Return whether the configured model should use the OpenAI Images API."""
+        model = (self.model or "").lower()
+        return model.startswith("gpt-image-") or "/gpt-image-" in model
+
+    def _call_model_openai_image_api(self, prompt: str, reference_images: List[dict]) -> tuple:
+        """Call an OpenAI-compatible Images API gateway.
+
+        Text-only generation uses /images/generations. When reference images are
+        present, use /images/edits so existing figure/style references are kept.
+        """
+        logger = logging.getLogger(__name__)
+        max_retries = 3
+        retry_delay = 2
+        endpoint = "/images/edits" if reference_images else "/images/generations"
+        url = f"{self.base_url.rstrip('/')}{endpoint}"
+        headers = {"Authorization": f"Bearer {self.api_key}"}
+        data = {
+            "model": self.model,
+            "prompt": self._build_openai_image_prompt(prompt, reference_images),
+            "n": "1",
+            "size": os.getenv("IMAGE_GEN_SIZE", "1536x1024"),
+        }
+
+        for attempt in range(max_retries):
+            files = self._build_openai_image_files(reference_images)
+            try:
+                logger.info(
+                    "Calling OpenAI-compatible Images API %s (attempt %s/%s)...",
+                    endpoint,
+                    attempt + 1,
+                    max_retries,
+                )
+                if files:
+                    response = requests.post(url, headers=headers, data=data, files=files, timeout=180)
+                else:
+                    json_headers = {**headers, "Content-Type": "application/json"}
+                    payload = {**data, "n": 1}
+                    response = requests.post(url, headers=json_headers, json=payload, timeout=180)
+
+                if response.status_code >= 400:
+                    logger.warning(
+                        "Images API error %s: %s",
+                        response.status_code,
+                        response.text[:300],
+                    )
+                    if attempt < max_retries - 1:
+                        time.sleep(retry_delay * (attempt + 1))
+                        continue
+                    response.raise_for_status()
+
+                image_data, mime_type = self._extract_openai_image_response(response)
+                logger.info("Image generation successful (OpenAI-compatible Images API)")
+                return image_data, mime_type
+            except Exception as e:
+                logger.error(
+                    "Error in Images API call (attempt %s/%s): %s",
+                    attempt + 1,
+                    max_retries,
+                    str(e),
+                )
+                if attempt < max_retries - 1:
+                    time.sleep(retry_delay * (attempt + 1))
+                    continue
+                raise
+        raise RuntimeError("Image generation failed after all retry attempts")
+
+    def _build_openai_image_prompt(self, prompt: str, reference_images: List[dict]) -> str:
+        """Append reference labels to the prompt for Images API edits."""
+        labels = []
+        for img in reference_images:
+            if img.get("base64") and img.get("mime_type"):
+                fig_id = img.get("figure_id", "Figure")
+                caption = img.get("caption", "")
+                labels.append(f"[{fig_id}]: {caption}" if caption else f"[{fig_id}]")
+        if not labels:
+            return prompt
+        return f"{prompt}\n\nReference images:\n" + "\n".join(labels)
+
+    def _build_openai_image_files(self, reference_images: List[dict]) -> List[tuple]:
+        """Build multipart image fields for /images/edits."""
+        files = []
+        for index, img in enumerate(reference_images):
+            if not img.get("base64") or not img.get("mime_type"):
+                continue
+            mime_type = img["mime_type"]
+            ext = mime_type.split("/")[-1].split("+")[0] or "png"
+            image_bytes = base64.b64decode(img["base64"])
+            files.append((
+                "image[]",
+                (f"reference_{index}.{ext}", image_bytes, mime_type),
+            ))
+        return files
+
+    def _extract_openai_image_response(self, response: requests.Response) -> tuple:
+        """Extract image bytes from an Images API response."""
+        data = response.json()
+        images = data.get("data") or []
+        if not images or not isinstance(images[0], dict):
+            raise RuntimeError(f"Image generation failed - invalid Images API response: {data}")
+
+        first = images[0]
+        if first.get("b64_json"):
+            return base64.b64decode(first["b64_json"]), "image/png"
+        if first.get("url"):
+            image_resp = self._download_response_image(first["url"])
+            mime_type = image_resp.headers.get("Content-Type", "image/png").split(";")[0]
+            return image_resp.content, mime_type
+
+        raise RuntimeError("Image generation failed - no image data in Images API response")
+
+    def _normalize_generated_image(self, image_data: bytes, mime_type: str) -> tuple:
+        """Normalize generated images to the configured output canvas size."""
+        target_size = self._parse_image_size(self.output_image_size)
+        if not target_size:
+            return image_data, mime_type
+
+        from PIL import Image
+        import io
+
+        with Image.open(io.BytesIO(image_data)) as img:
+            if img.mode not in ("RGB", "RGBA"):
+                img = img.convert("RGB")
+            else:
+                img = img.copy()
+
+        resample_filter = getattr(Image, "Resampling", Image).LANCZOS
+        target_w, target_h = target_size
+        fit = self.output_image_fit
+
+        if fit == "stretch":
+            canvas = img.resize((target_w, target_h), resample_filter).convert("RGB")
+        elif fit == "cover":
+            canvas = self._resize_image_cover(img, target_w, target_h, resample_filter)
+        elif fit == "contain":
+            canvas = self._resize_image_contain(img, target_w, target_h, resample_filter)
+        else:
+            raise ValueError("Invalid IMAGE_OUTPUT_FIT: %s. Expected stretch, cover, or contain." % fit)
+
+        buffer = io.BytesIO()
+        canvas.save(buffer, format="PNG")
+        return buffer.getvalue(), "image/png"
+
+    def _resize_image_cover(self, image, target_w: int, target_h: int, resample_filter):
+        """Fill the target canvas by center-cropping overflow."""
+        from PIL import Image
+
+        scale = max(target_w / image.width, target_h / image.height)
+        resized_w = max(1, round(image.width * scale))
+        resized_h = max(1, round(image.height * scale))
+        resized = image.resize((resized_w, resized_h), resample_filter).convert("RGB")
+        left = max(0, (resized_w - target_w) // 2)
+        top = max(0, (resized_h - target_h) // 2)
+        return resized.crop((left, top, left + target_w, top + target_h))
+
+    def _resize_image_contain(self, image, target_w: int, target_h: int, resample_filter):
+        """Fit the full source image inside the target canvas with padding."""
+        from PIL import Image
+
+        scale = min(target_w / image.width, target_h / image.height)
+        resized_w = max(1, round(image.width * scale))
+        resized_h = max(1, round(image.height * scale))
+        resized = image.resize((resized_w, resized_h), resample_filter)
+        background_color = self._estimate_background_color(image)
+        canvas = Image.new("RGB", (target_w, target_h), background_color)
+        if resized.mode == "RGBA":
+            canvas.paste(resized.convert("RGB"), ((target_w - resized_w) // 2, (target_h - resized_h) // 2), resized)
+        else:
+            canvas.paste(resized.convert("RGB"), ((target_w - resized_w) // 2, (target_h - resized_h) // 2))
+        return canvas
+
+    def _parse_image_size(self, value: str) -> Optional[tuple]:
+        """Parse WIDTHxHEIGHT size strings."""
+        if not value:
+            return None
+        match = re.fullmatch(r"\s*(\d+)x(\d+)\s*", value)
+        if not match:
+            raise ValueError(f"Invalid IMAGE_OUTPUT_SIZE: {value}. Expected WIDTHxHEIGHT.")
+        width, height = int(match.group(1)), int(match.group(2))
+        if width <= 0 or height <= 0:
+            raise ValueError(f"Invalid IMAGE_OUTPUT_SIZE: {value}. Width and height must be positive.")
+        return width, height
+
+    def _estimate_background_color(self, image) -> tuple:
+        """Use corner pixels as the padding color to avoid harsh side bars."""
+        rgb = image.convert("RGB")
+        points = [
+            (0, 0),
+            (rgb.width - 1, 0),
+            (0, rgb.height - 1),
+            (rgb.width - 1, rgb.height - 1),
+        ]
+        colors = [rgb.getpixel(point) for point in points]
+        return tuple(round(sum(color[i] for color in colors) / len(colors)) for i in range(3))
 
     def _call_model_openrouter_via_responses(self, prompt: str, reference_images: List[dict]) -> tuple:
         """Fallback for gateways that expose image generation via the Responses API."""
