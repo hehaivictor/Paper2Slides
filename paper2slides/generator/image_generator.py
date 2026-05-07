@@ -113,6 +113,20 @@ class ImageGenerator:
             self.client = None
         else:
             raise ValueError(f"Unsupported image generation provider: {self.provider}")
+        self.style_client = self._build_style_client()
+
+    def _build_style_client(self) -> OpenAI:
+        """Use a text LLM client for custom style parsing."""
+        api_key = os.getenv("STYLE_LLM_API_KEY") or os.getenv("RAG_LLM_API_KEY")
+        base_url = os.getenv("STYLE_LLM_BASE_URL") or os.getenv("RAG_LLM_BASE_URL")
+        if api_key:
+            if base_url:
+                return OpenAI(api_key=api_key, base_url=base_url)
+            return OpenAI(api_key=api_key)
+        return self.client
+
+    def _style_model(self) -> str:
+        return os.getenv("STYLE_LLM_MODEL") or os.getenv("LLM_MODEL", "openai/gpt-4o-mini")
     
     def generate(
         self,
@@ -141,7 +155,11 @@ class ImageGenerator:
         # Process custom style with LLM if needed
         processed_style = None
         if style_name == "custom" and custom_style:
-            processed_style = process_custom_style(self.client, custom_style)
+            processed_style = process_custom_style(
+                self.style_client,
+                custom_style,
+                model=self._style_model(),
+            )
             if not processed_style.valid:
                 raise ValueError(f"Invalid custom style: {processed_style.error}")
         

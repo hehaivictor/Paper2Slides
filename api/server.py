@@ -57,6 +57,7 @@ for env_path in (PROJECT_ROOT / ".env", PROJECT_ROOT / "paper2slides" / ".env"):
         break
 
 DEFAULT_PRESENTATION_PROFILE = os.getenv("PAPER2SLIDES_PROFILE", DEFAULT_PRESENTATION_PROFILE).strip() or DEFAULT_PRESENTATION_PROFILE
+IMAGE_OUTPUT_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp"}
 
 # Import paper2slides functions
 from paper2slides.core import (
@@ -167,6 +168,72 @@ def _public_url(path: str) -> str:
     if PUBLIC_BASE_URL:
         return f"{PUBLIC_BASE_URL}{path}"
     return path
+
+
+def _build_generation_progress(config_dir: Optional[Path], state_data: Optional[dict]) -> dict:
+    """Build page-level progress from the persisted plan and generated image files."""
+    if not config_dir:
+        return {}
+    try:
+        from paper2slides.core.paths import get_plan_checkpoint
+
+        plan_data = load_json(get_plan_checkpoint(config_dir)) or {}
+        plan = plan_data.get("plan") if isinstance(plan_data, dict) else {}
+        sections = plan.get("sections") if isinstance(plan, dict) else []
+        config = state_data.get("config", {}) if isinstance(state_data, dict) else {}
+        output_type = str(config.get("output_type") or plan.get("output_type") or DEFAULT_OUTPUT_TYPE).strip().lower()
+
+        total_pages = 1 if output_type == "poster" else len(sections or [])
+        progress_state = state_data.get("progress") if isinstance(state_data, dict) else {}
+        output_dir_value = ""
+        if isinstance(progress_state, dict):
+            output_dir_value = str(progress_state.get("output_dir") or "").strip()
+        output_dir = Path(output_dir_value) if output_dir_value else None
+        if not output_dir or not output_dir.exists():
+            existing_output_dirs = [
+                item for item in config_dir.iterdir()
+                if item.is_dir() and item.name[:8].isdigit()
+            ]
+            output_dir = max(existing_output_dirs, key=lambda item: item.stat().st_mtime, default=config_dir)
+        generated_pages = 0
+        pdf_exists = False
+        if output_dir.exists() and output_dir.is_dir():
+            generated_pages = len([
+                item for item in output_dir.iterdir()
+                if item.is_file() and item.suffix.lower() in IMAGE_OUTPUT_EXTENSIONS
+            ])
+            pdf_exists = (output_dir / "slides.pdf").exists()
+
+        if total_pages <= 0:
+            total_pages = generated_pages
+        if total_pages <= 0:
+            return {}
+
+        generated_pages = min(max(generated_pages, 0), total_pages)
+        stage_status = ""
+        if isinstance(state_data, dict):
+            stages = state_data.get("stages")
+            if isinstance(stages, dict):
+                stage_status = str(stages.get("generate") or "").strip().lower()
+        if stage_status == "completed" and (output_type != "slides" or pdf_exists):
+            generated_pages = total_pages
+
+        progress = round((generated_pages / total_pages) * 100)
+        return {
+            "progress": max(0, min(progress, 100)),
+            "generated_pages": generated_pages,
+            "total_pages": total_pages,
+            "page_progress": {
+                "current": generated_pages,
+                "total": total_pages,
+                "unit": "page",
+            },
+            "output_dir": str(output_dir),
+            "pdf_exists": pdf_exists,
+        }
+    except Exception as exc:
+        logger.debug(f"Unable to build generation progress: {exc}")
+        return {}
 
 
 def _job_result_path(session_id: str) -> Path:
@@ -825,6 +892,7 @@ async def get_status(session_id: str):
         
         # Check both paper and general content types
         state_data = None
+        state_file = None
         most_recent_time = None
         
         for content_type in ["paper", "general"]:
@@ -840,17 +908,19 @@ async def get_status(session_id: str):
                             # First priority: exact match by session_id
                             if current_state.get("session_id") == session_id:
                                 state_data = current_state
+                                state_file = state_file_path
                                 logger.debug(f"Found exact session match: {state_file_path}")
                                 break
                             
-                            # Second priority: most recently updated (fallback for old state files)
+                            # Second priority: most recently updated legacy state.
+                            # Never use another job's explicit session_id as a fallback.
+                            if current_state.get("session_id"):
+                                continue
                             updated_at = current_state.get("updated_at") or current_state.get("created_at")
-                            if updated_at:
-                                if most_recent_time is None or updated_at > most_recent_time:
-                                    most_recent_time = updated_at
-                                    # Only use as fallback if no exact match found
-                                    if state_data is None or state_data.get("session_id") != session_id:
-                                        state_data = current_state
+                            if updated_at and (most_recent_time is None or updated_at > most_recent_time):
+                                most_recent_time = updated_at
+                                state_data = current_state
+                                state_file = state_file_path
                         except Exception as e:
                             logger.warning(f"Error reading state file {state_file_path}: {e}")
                             continue
@@ -860,15 +930,41 @@ async def get_status(session_id: str):
                     break
         
         if not state_data:
+            if session_manager.get_running_session() == session_id:
+                return {
+                    "session_id": session_id,
+                    "status": "running",
+                    "stages": {
+                        "rag": "pending",
+                        "summary": "pending",
+                        "plan": "pending",
+                        "generate": "running",
+                    },
+                    "error": None,
+                }
+            result = _load_job_result(session_id) or {}
+            if result and result.get("status") != "queued" and not result.get("error"):
+                return {
+                    "session_id": session_id,
+                    "status": "completed",
+                    "stages": {
+                        "rag": "completed",
+                        "summary": "completed",
+                        "plan": "completed",
+                        "generate": "completed",
+                    },
+                    "error": None,
+                }
             return {
                 "session_id": session_id,
-                "status": "pending",
+                "status": "failed",
                 "stages": {
                     "rag": "pending",
                     "summary": "pending",
                     "plan": "pending",
-                    "generate": "pending"
-                }
+                    "generate": "failed",
+                },
+                "error": result.get("error") or "Job is not running and no matching state was found",
             }
         
         # Determine overall status
@@ -882,12 +978,14 @@ async def get_status(session_id: str):
         else:
             overall_status = "pending"
 
+        progress_payload = _build_generation_progress(state_file.parent if state_file else None, state_data)
         return {
             "session_id": session_id,
             "status": overall_status,
             "stages": stages,
             "error": state_data.get("error"),
-            "updated_at": state_data.get("updated_at")
+            "updated_at": state_data.get("updated_at"),
+            **progress_payload,
         }
         
     except Exception as e:

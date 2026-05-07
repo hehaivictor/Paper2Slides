@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Dict
 
 from ...utils import load_json
+from ..state import load_state, save_state
 from ..paths import get_summary_checkpoint, get_plan_checkpoint, get_output_dir
 
 logger = logging.getLogger(__name__)
@@ -86,13 +87,31 @@ async def run_generate_stage(base_dir: Path, config_dir: Path, config: Dict) -> 
     output_subdir = get_output_dir(config_dir)
     output_subdir.mkdir(parents=True, exist_ok=True)
     ext_map = {"image/png": ".png", "image/jpeg": ".jpg", "image/webp": ".webp"}
+    generated_count = 0
+
+    def update_progress(current: int, total: int, pdf_exists: bool = False):
+        state = load_state(config_dir) or {}
+        state["progress"] = {
+            "phase": "generate",
+            "current": max(0, min(current, total)),
+            "total": max(0, total),
+            "unit": "page",
+            "output_dir": str(output_subdir),
+            "pdf_exists": bool(pdf_exists),
+        }
+        save_state(config_dir, state)
+
+    update_progress(0, len(plan.sections))
     
     # Save callback: save each image immediately after generation
     def save_image_callback(img, index, total):
+        nonlocal generated_count
         ext = ext_map.get(img.mime_type, ".png")
         filepath = output_subdir / f"{img.section_id}{ext}"
         with open(filepath, "wb") as f:
             f.write(img.image_data)
+        generated_count += 1
+        update_progress(generated_count, total)
         logger.info(f"  [{index+1}/{total}] Saved: {filepath.name}")
     
     generator = ImageGenerator()
@@ -105,6 +124,7 @@ async def run_generate_stage(base_dir: Path, config_dir: Path, config: Dict) -> 
     if output_type == "slides" and len(images) > 1:
         pdf_path = output_subdir / "slides.pdf"
         save_images_as_pdf(images, str(pdf_path))
+        update_progress(len(images), len(images), pdf_exists=True)
         logger.info(f"  Saved: slides.pdf")
     
     logger.info("")

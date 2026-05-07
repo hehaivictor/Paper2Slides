@@ -290,12 +290,24 @@ async def _run_direct_queries(
         async with semaphore:
             try:
                 messages = [{"role": "system", "content": system_prompt}]
-                user_content = [{"type": "text", "text": "# Document Content\n\n"}]
-                user_content.extend(all_content_parts)
-                user_content.append({
-                    "type": "text",
-                    "text": f"\n\n# Question\n\n{query}\n\nPlease answer in detail based only on the content above.",
-                })
+                if total_images:
+                    user_content = [{"type": "text", "text": "# Document Content\n\n"}]
+                    user_content.extend(all_content_parts)
+                    user_content.append({
+                        "type": "text",
+                        "text": f"\n\n# Question\n\n{query}\n\nPlease answer in detail based only on the content above.",
+                    })
+                else:
+                    document_text = "\n".join(
+                        part.get("text", "")
+                        for part in all_content_parts
+                        if part.get("type") == "text"
+                    )
+                    user_content = (
+                        f"# Document Content\n\n{document_text}\n\n"
+                        f"# Question\n\n{query}\n\n"
+                        "Please answer in detail based only on the content above."
+                    )
                 messages.append({"role": "user", "content": user_content})
 
                 response = await asyncio.to_thread(

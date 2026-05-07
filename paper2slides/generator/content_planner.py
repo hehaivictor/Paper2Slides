@@ -346,9 +346,10 @@ class ContentPlanner:
         
         try:
             logger.info(f"Calling {self.model} with max_tokens={self.max_tokens}")
+            message_content = content if any(item.get("type") == "image_url" for item in content) else text_prompt
             response = self.client.chat.completions.create(
                 model=self.model,
-                messages=[{"role": "user", "content": content}],
+                messages=[{"role": "user", "content": message_content}],
                 max_tokens=self.max_tokens,
             )
             result = response.choices[0].message.content or ""

@@ -33,6 +33,8 @@ async def run_pipeline(base_dir: Path, config_dir: Path, config: Dict, from_stag
     else:
         # When regenerating, reset the status of stages that will be executed
         # This ensures the frontend progress bar shows correct progress
+        state["config"] = config
+        state["error"] = None
         start_idx = STAGES.index(from_stage)
         for i in range(start_idx, len(STAGES)):
             state["stages"][STAGES[i]] = "pending"
